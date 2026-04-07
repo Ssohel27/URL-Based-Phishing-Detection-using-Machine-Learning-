@@ -1,0 +1,156 @@
+# Install dependencies (run once in Colab)
+!pip install tldextract gradio
+
+import pandas as pd
+import numpy as np
+import re
+import tldextract
+from urllib.parse import urlparse
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# ===================== LOAD DATA =====================
+df = pd.read_csv('/phishing_site_urls.csv')
+
+# Fix column name issue
+df.columns = ['URL', 'Label']
+
+print("Dataset Shape:", df.shape)
+
+# Convert labels
+df['Label'] = df['Label'].map({'bad': 1, 'good': 0})
+print(df['Label'].value_counts())
+
+# ===================== FEATURE EXTRACTION =====================
+def extract_features(url):
+    features = {}
+
+    try:
+        features['url_length'] = len(url)
+        features['count_dots'] = url.count('.')
+        features['count_hyphens'] = url.count('-')
+        features['count_at'] = url.count('@')
+        features['count_question'] = url.count('?')
+        features['count_slash'] = url.count('/')
+        features['count_equal'] = url.count('=')
+        features['count_https'] = url.count('https')
+        features['count_http'] = url.count('http')
+        features['has_ip'] = 1 if re.search(r'\d+\.\d+\.\d+\.\d+', url) else 0
+
+        parsed = urlparse(url)
+        ext = tldextract.extract(url)
+
+        features['subdomain_length'] = len(ext.subdomain)
+        features['domain_length'] = len(ext.domain)
+        features['tld_length'] = len(ext.suffix)
+
+    except:
+        # fallback if URL parsing fails
+        features = {k: 0 for k in [
+            'url_length','count_dots','count_hyphens','count_at',
+            'count_question','count_slash','count_equal',
+            'count_https','count_http','has_ip',
+            'subdomain_length','domain_length','tld_length'
+        ]}
+
+    return features
+
+# Create feature dataframe
+feature_df = df['URL'].apply(lambda x: pd.Series(extract_features(x)))
+
+X = feature_df
+y = df['Label']
+
+# Drop NaNs safely
+valid_idx = y.dropna().index
+X = X.loc[valid_idx]
+y = y.loc[valid_idx]
+
+# ===================== TRAIN TEST SPLIT =====================
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y
+)
+
+# ===================== MODELS =====================
+# Logistic Regression
+lr = LogisticRegression(max_iter=1000)
+lr.fit(X_train, y_train)
+
+y_pred_lr = lr.predict(X_test)
+print("Logistic Regression Accuracy:", accuracy_score(y_test, y_pred_lr))
+
+# Random Forest
+rf = RandomForestClassifier(n_estimators=200, random_state=42)
+rf.fit(X_train, y_train)
+
+y_pred_rf = rf.predict(X_test)
+print("Random Forest Accuracy:", accuracy_score(y_test, y_pred_rf))
+
+print("\nClassification Report:\n", classification_report(y_test, y_pred_rf))
+
+# ===================== CONFUSION MATRIX =====================
+cm = confusion_matrix(y_test, y_pred_rf)
+
+plt.figure(figsize=(5,4))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.title('Confusion Matrix')
+plt.show()
+
+# ===================== FEATURE IMPORTANCE =====================
+importances = rf.feature_importances_
+features = X.columns
+
+feat_imp = pd.Series(importances, index=features).sort_values(ascending=False)
+
+feat_imp.plot(kind='bar', figsize=(10,5), title='Feature Importance')
+plt.show()
+
+# ===================== PREDICTION FUNCTION =====================
+def predict_url(URL):
+    data = pd.DataFrame([extract_features(URL)])
+    data = data[X.columns]  # ensure correct order
+    prediction = rf.predict(data)[0]
+
+    return '🚨 Phishing Website' if prediction == 1 else '✅ Legitimate Website'
+
+# Test
+print(predict_url('https://google.com'))
+
+# ===================== GRADIO UI =====================
+import gradio as gr
+
+def gradio_predict(URL):
+    if URL.strip() == "":
+        return "⚠️ Please enter a URL"
+
+    data = pd.DataFrame([extract_features(URL)])
+    data = data[X.columns]
+
+    prediction = rf.predict(data)[0]
+    probability = rf.predict_proba(data)[0][prediction]
+
+    if prediction == 1:
+        return f"🚨 Phishing Website\nConfidence: {probability:.2f}"
+    else:
+        return f"✅ Legitimate Website\nConfidence: {probability:.2f}"
+
+interface = gr.Interface(
+    fn=gradio_predict,
+    inputs=gr.Textbox(
+        label="Enter Website URL",
+        placeholder="https://secure-paypal-login-verification.com"
+    ),
+    outputs=gr.Textbox(label="Prediction Result"),
+    title="AI-Based Phishing Website Detection",
+    description="Detect phishing websites using ML",
+)
+
+interface.launch(share=True)
